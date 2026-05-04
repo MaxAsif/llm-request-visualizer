@@ -66,3 +66,36 @@ it("filters by source", async () => {
 
   expect((await caller.exchanges.list({ source: "codex" })).map((e) => e.id)).toEqual(["b"])
 })
+
+const anthropicBody = (texts: ReadonlyArray<string>): Uint8Array =>
+  new TextEncoder().encode(
+    JSON.stringify({
+      model: "claude-x",
+      messages: texts.map((text) => ({ role: "user", content: [{ type: "text", text }] }))
+    })
+  )
+
+it("groups exchanges into sessions by prefix-matching and splits on the idle timeout", async () => {
+  const minute = 60_000
+  await Effect.runPromise(
+    storage.writeExchange(exchange("a", 0, { request_body: anthropicBody(["one"]) }))
+  )
+  await Effect.runPromise(
+    storage.writeExchange(exchange("b", minute, { request_body: anthropicBody(["one", "two"]) }))
+  )
+  await Effect.runPromise(
+    storage.writeExchange(exchange("c", 90 * minute, { request_body: anthropicBody(["one", "two", "three"]) }))
+  )
+
+  const caller = createAppRouter(storage).createCaller({})
+
+  const grouped = await caller.sessions.list({ sort: "oldest" })
+  expect(grouped.map((session) => session.exchanges.map((e) => e.id))).toEqual([["a", "b"], ["c"]])
+  expect(grouped[0]!.models).toEqual(["claude-x"])
+  expect(grouped[0]!.groupedBy).toBe("prefix")
+
+  const merged = await caller.sessions.list({ sort: "oldest", idleTimeoutMinutes: 120 })
+  expect(merged.map((session) => session.exchanges.map((e) => e.id))).toEqual([["a", "b", "c"]])
+
+  expect((await caller.sessions.list({ model: "gpt-nope" })).length).toBe(0)
+})
