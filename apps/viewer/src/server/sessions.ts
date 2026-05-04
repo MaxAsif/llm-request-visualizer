@@ -30,12 +30,37 @@ export const DEFAULT_IDLE_TIMEOUT_MINUTES = 30
  */
 const NATIVE_SESSION_HEADERS: ReadonlyArray<string> = []
 
+const decoder = new TextDecoder()
+
+/**
+ * Claude Code sends its session id inside the request body, not a header: the Anthropic
+ * `metadata.user_id` field is a JSON-encoded string of the form
+ * `{"device_id":...,"account_uuid":...,"session_id":...}`. Confirmed empirically against real
+ * proxy traffic — this is the header extension point mentioned above, applied to the body.
+ */
+const bodySessionId = (body: Uint8Array): string | null => {
+  try {
+    const parsed: unknown = JSON.parse(decoder.decode(body))
+    if (typeof parsed !== "object" || parsed === null) return null
+    const userId = (parsed as { metadata?: unknown }).metadata
+    const rawUserId =
+      typeof userId === "object" && userId !== null ? (userId as { user_id?: unknown }).user_id : undefined
+    if (typeof rawUserId !== "string") return null
+    const decodedUserId: unknown = JSON.parse(rawUserId)
+    if (typeof decodedUserId !== "object" || decodedUserId === null) return null
+    const sessionId = (decodedUserId as { session_id?: unknown }).session_id
+    return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null
+  } catch {
+    return null
+  }
+}
+
 export const nativeSessionId = ({ exchange }: SessionCandidate): string | null => {
   for (const header of NATIVE_SESSION_HEADERS) {
     const value = exchange.request_headers[header]
     if (value !== undefined && value.length > 0) return value
   }
-  return null
+  return bodySessionId(exchange.request_body)
 }
 
 const fingerprint = (canonical: CanonicalExchange): ReadonlyArray<string> =>

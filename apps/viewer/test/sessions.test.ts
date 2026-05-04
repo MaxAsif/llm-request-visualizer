@@ -50,8 +50,33 @@ const candidate = (
   canonical: canonical(id, texts)
 })
 
-it("finds no native session signal today", () => {
+it("finds no native session signal from headers alone", () => {
   expect(nativeSessionId(candidate("a", 0, ["hi"], { request_headers: { "x-session-id": "s1" } }))).toBeNull()
+})
+
+it("extracts the native session id from an Anthropic metadata.user_id body", () => {
+  const body = JSON.stringify({
+    metadata: { user_id: JSON.stringify({ device_id: "d1", account_uuid: "u1", session_id: "s1" }) }
+  })
+  expect(
+    nativeSessionId(candidate("a", 0, ["hi"], { request_body: new TextEncoder().encode(body) }))
+  ).toBe("s1")
+})
+
+it("groups exchanges sharing a body-embedded session id even without a message prefix relationship", () => {
+  const bodyFor = (sessionId: string): Uint8Array =>
+    new TextEncoder().encode(
+      JSON.stringify({ metadata: { user_id: JSON.stringify({ session_id: sessionId }) } })
+    )
+
+  const sessions = groupSessions([
+    candidate("a", 0, ["quota"], { request_body: bodyFor("s1") }),
+    candidate("b", 1, ["title"], { request_body: bodyFor("s1") }),
+    candidate("c", 2, ["unrelated"], { request_body: bodyFor("s2") })
+  ])
+
+  expect(sessions.map((session) => session.exchanges.map((e) => e.id))).toEqual([["a", "b"], ["c"]])
+  expect(sessions[0]!.groupedBy).toBe("native")
 })
 
 it("chains exchanges whose message history extends a prior exchange", () => {
