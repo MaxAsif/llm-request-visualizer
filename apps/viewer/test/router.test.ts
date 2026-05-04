@@ -100,6 +100,41 @@ it("groups exchanges into sessions by prefix-matching and splits on the idle tim
   expect((await caller.sessions.list({ model: "gpt-nope" })).length).toBe(0)
 })
 
+it("returns a session's exchanges chronologically with each one diffed against the previous", async () => {
+  const minute = 60_000
+  await Effect.runPromise(
+    storage.writeExchange(exchange("a", 0, { request_body: anthropicBody(["one"]) }))
+  )
+  await Effect.runPromise(
+    storage.writeExchange(exchange("b", minute, { request_body: anthropicBody(["one", "two"]) }))
+  )
+  await Effect.runPromise(
+    storage.writeExchange(exchange("c", 2 * minute, { request_body: anthropicBody(["one", "two", "three"]) }))
+  )
+
+  const caller = createAppRouter(storage).createCaller({})
+  const session = await caller.sessions.get({ id: "a" })
+
+  expect(session.exchanges.map((e) => e.summary.id)).toEqual(["a", "b", "c"])
+  expect(session.exchanges[0]!.diff).toBeNull()
+  expect(session.exchanges[0]!.canonical.messages.length).toBe(1)
+
+  expect(session.exchanges[1]!.diff).toMatchObject({
+    unchangedMessages: 1,
+    diverged: false,
+    systemPromptChanged: false
+  })
+  expect(session.exchanges[1]!.diff!.newMessages.map((m) => m.content[0])).toEqual([
+    { type: "text", text: "two" }
+  ])
+  expect(session.exchanges[2]!.diff!.unchangedMessages).toBe(2)
+  expect(session.exchanges[2]!.diff!.newMessages.length).toBe(1)
+
+  expect(session.exchanges[1]!.raw.requestBody).toContain('"two"')
+
+  await expect(caller.sessions.get({ id: "missing" })).rejects.toThrow(/no session with id/)
+})
+
 const sseChunks = (exchangeId: string, events: ReadonlyArray<string>): ReadonlyArray<Chunk> =>
   events.map((event, index) => ({
     id: `${exchangeId}-${index}`,

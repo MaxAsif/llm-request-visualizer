@@ -9,6 +9,7 @@ type ExchangeDetail = inferRouterOutputs<AppRouter>["exchanges"]["get"]
 type CanonicalExchange = ExchangeDetail["canonical"]
 type ContentBlock = CanonicalExchange["messages"][number]["content"][number]
 type RawPayload = ExchangeDetail["raw"]
+type SessionExchange = inferRouterOutputs<AppRouter>["sessions"]["get"]["exchanges"][number]
 
 const formatTime = (ms: number): string => new Date(ms).toLocaleTimeString()
 
@@ -116,6 +117,30 @@ const Block = ({ block }: { block: ContentBlock }) => {
   return <pre style={pre}>{JSON.stringify(block.raw, null, 2)}</pre>
 }
 
+const MessageList = ({ messages }: { messages: CanonicalExchange["messages"] }) => (
+  <>
+    {messages.map((message, index) => (
+      <div key={index} style={{ marginBottom: "0.5rem" }}>
+        <strong style={{ fontSize: "0.8125rem" }}>{message.role}</strong>
+        {message.content.map((block, blockIndex) => (
+          <Block key={blockIndex} block={block} />
+        ))}
+      </div>
+    ))}
+  </>
+)
+
+const ToolCallsSection = ({ calls }: { calls: CanonicalExchange["toolCalls"] }) =>
+  calls.length === 0 ? null : (
+    <Section title={`Tool calls (${calls.length})`}>
+      {calls.map((call) => (
+        <pre key={call.id} style={pre}>
+          {`${call.name} (${call.id})\n${JSON.stringify(call.input, null, 2)}`}
+        </pre>
+      ))}
+    </Section>
+  )
+
 const CanonicalView = ({ canonical }: { canonical: CanonicalExchange }) => (
   <>
     <Section title="Overview">
@@ -130,14 +155,7 @@ const CanonicalView = ({ canonical }: { canonical: CanonicalExchange }) => (
       </Section>
     )}
     <Section title={`Messages (${canonical.messages.length})`}>
-      {canonical.messages.map((message, index) => (
-        <div key={index} style={{ marginBottom: "0.5rem" }}>
-          <strong style={{ fontSize: "0.8125rem" }}>{message.role}</strong>
-          {message.content.map((block, blockIndex) => (
-            <Block key={blockIndex} block={block} />
-          ))}
-        </div>
-      ))}
+      <MessageList messages={canonical.messages} />
     </Section>
     {canonical.reasoning.length === 0 ? null : (
       <Section title="Reasoning">
@@ -151,15 +169,7 @@ const CanonicalView = ({ canonical }: { canonical: CanonicalExchange }) => (
     <Section title="Response">
       <pre style={pre}>{canonical.responseText === "" ? "—" : canonical.responseText}</pre>
     </Section>
-    {canonical.toolCalls.length === 0 ? null : (
-      <Section title={`Tool calls (${canonical.toolCalls.length})`}>
-        {canonical.toolCalls.map((call) => (
-          <pre key={call.id} style={pre}>
-            {`${call.name} (${call.id})\n${JSON.stringify(call.input, null, 2)}`}
-          </pre>
-        ))}
-      </Section>
-    )}
+    <ToolCallsSection calls={canonical.toolCalls} />
     {canonical.toolResults.length === 0 ? null : (
       <Section title={`Tool results (${canonical.toolResults.length})`}>
         {canonical.toolResults.map((result) => (
@@ -277,7 +287,127 @@ const ExchangeDetailView = ({ id, onBack }: { id: string; onBack: () => void }) 
   )
 }
 
-const SessionCard = ({ session, onSelect }: { session: SessionSummary; onSelect: (id: string) => void }) => {
+const muted = { fontSize: "0.8125rem", color: "#888", margin: "0.25rem 0" }
+
+const DiffView = ({
+  canonical,
+  diff
+}: {
+  canonical: CanonicalExchange
+  diff: NonNullable<SessionExchange["diff"]>
+}) => (
+  <>
+    {diff.systemPromptChanged ? (
+      <Section title="System prompt (changed)">
+        <pre style={pre}>{canonical.systemPrompt ?? "—"}</pre>
+      </Section>
+    ) : null}
+    <Section title={`New in this turn (${diff.newMessages.length} message${diff.newMessages.length === 1 ? "" : "s"})`}>
+      {diff.unchangedMessages > 0 ? (
+        <p style={muted}>
+          ⋯ {diff.unchangedMessages} unchanged message{diff.unchangedMessages === 1 ? "" : "s"} collapsed
+        </p>
+      ) : null}
+      {diff.diverged ? (
+        <p style={{ ...muted, color: "crimson" }}>
+          Diverged from the previous exchange — earlier messages were dropped or rewritten.
+        </p>
+      ) : null}
+      {diff.newMessages.length === 0 ? (
+        <p style={muted}>No new request messages.</p>
+      ) : (
+        <MessageList messages={diff.newMessages} />
+      )}
+    </Section>
+    <Section title="Response">
+      <pre style={pre}>{canonical.responseText === "" ? "—" : canonical.responseText}</pre>
+    </Section>
+    <ToolCallsSection calls={canonical.toolCalls} />
+  </>
+)
+
+type ExchangeMode = "diff" | "canonical" | "raw"
+
+const SessionExchangeCard = ({ exchange, index }: { exchange: SessionExchange; index: number }) => {
+  const modes: ReadonlyArray<ExchangeMode> =
+    exchange.diff === null ? ["canonical", "raw"] : ["diff", "canonical", "raw"]
+  const [mode, setMode] = useState<ExchangeMode>(modes[0]!)
+
+  return (
+    <li style={{ border: "1px solid #ddd", borderRadius: "0.25rem", marginBottom: "0.75rem", padding: "0.75rem" }}>
+      <div style={{ fontSize: "0.875rem", marginBottom: "0.5rem" }}>
+        <strong>#{index + 1}</strong> · {formatTime(exchange.summary.timestampStart)} ·{" "}
+        <code>{exchange.summary.path}</code> · {statusLabel(exchange.summary)} ·{" "}
+        {formatDuration(exchange.summary)}
+      </div>
+      <nav style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+        {modes.map((name) => (
+          <button
+            key={name}
+            type="button"
+            onClick={() => setMode(name)}
+            style={{ fontWeight: mode === name ? 600 : 400, cursor: "pointer" }}
+          >
+            {name}
+          </button>
+        ))}
+      </nav>
+      {mode === "diff" && exchange.diff !== null ? (
+        <DiffView canonical={exchange.canonical} diff={exchange.diff} />
+      ) : null}
+      {mode === "canonical" ? <CanonicalView canonical={exchange.canonical} /> : null}
+      {mode === "raw" ? <RawView raw={exchange.raw} /> : null}
+    </li>
+  )
+}
+
+interface SessionQuery {
+  readonly id: string
+  readonly limit: number
+  readonly idleTimeoutMinutes: number
+  readonly source?: Source
+}
+
+const SessionDetailView = ({ query, onBack }: { query: SessionQuery; onBack: () => void }) => {
+  const trpc = useTRPC()
+  const session = useQuery(trpc.sessions.get.queryOptions(query))
+
+  return (
+    <>
+      <button type="button" onClick={onBack} style={{ cursor: "pointer", marginBottom: "0.75rem" }}>
+        ← back
+      </button>
+      {session.isPending ? <p>Loading…</p> : null}
+      {session.error !== null ? <p style={{ color: "crimson" }}>{session.error.message}</p> : null}
+      {session.data === undefined ? null : (
+        <>
+          <div style={{ fontSize: "0.875rem", marginBottom: "1rem" }}>
+            {formatTime(session.data.timestampStart)} – {formatTime(session.data.timestampEnd)} ·{" "}
+            {session.data.exchanges.length} exchange{session.data.exchanges.length === 1 ? "" : "s"} ·{" "}
+            {session.data.source} / {session.data.providerFormat}
+            {session.data.models.length > 0 ? ` · ${session.data.models.join(", ")}` : ""}
+            <span style={{ color: "#888" }}> · grouped by {session.data.groupedBy}</span>
+          </div>
+          <ol style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {session.data.exchanges.map((exchange, index) => (
+              <SessionExchangeCard key={exchange.summary.id} exchange={exchange} index={index} />
+            ))}
+          </ol>
+        </>
+      )}
+    </>
+  )
+}
+
+const SessionCard = ({
+  session,
+  onSelect,
+  onOpenSession
+}: {
+  session: SessionSummary
+  onSelect: (id: string) => void
+  onOpenSession: (id: string) => void
+}) => {
   const [expanded, setExpanded] = useState(false)
   return (
     <li style={{ border: "1px solid #ddd", borderRadius: "0.25rem", marginBottom: "0.75rem", padding: "0.75rem" }}>
@@ -296,6 +426,13 @@ const SessionCard = ({ session, onSelect }: { session: SessionSummary; onSelect:
         {session.models.length > 0 ? ` · ${session.models.join(", ")}` : ""}
         <span style={{ color: "#888" }}> · grouped by {session.groupedBy}</span>
       </button>
+      <button
+        type="button"
+        onClick={() => onOpenSession(session.id)}
+        style={{ cursor: "pointer", marginTop: "0.5rem" }}
+      >
+        open session
+      </button>
       {expanded ? (
         <div style={{ marginTop: "0.75rem" }}>
           <ExchangeTable exchanges={session.exchanges} onSelect={onSelect} />
@@ -307,7 +444,15 @@ const SessionCard = ({ session, onSelect }: { session: SessionSummary; onSelect:
 
 type Source = "claude-code" | "codex" | "unknown"
 
-const SessionsView = ({ onSelect }: { onSelect: (id: string) => void }) => {
+const SESSION_LIMIT = 500
+
+const SessionsView = ({
+  onSelect,
+  onOpenSession
+}: {
+  onSelect: (id: string) => void
+  onOpenSession: (query: SessionQuery) => void
+}) => {
   const trpc = useTRPC()
   const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState(30)
   const [source, setSource] = useState<Source | "">("")
@@ -316,7 +461,7 @@ const SessionsView = ({ onSelect }: { onSelect: (id: string) => void }) => {
 
   const sessions = useQuery({
     ...trpc.sessions.list.queryOptions({
-      limit: 500,
+      limit: SESSION_LIMIT,
       idleTimeoutMinutes,
       sort,
       ...(source === "" ? {} : { source }),
@@ -378,7 +523,19 @@ const SessionsView = ({ onSelect }: { onSelect: (id: string) => void }) => {
       ) : null}
       <ul style={{ listStyle: "none", padding: 0 }}>
         {(sessions.data ?? []).map((session) => (
-          <SessionCard key={session.id} session={session} onSelect={onSelect} />
+          <SessionCard
+            key={session.id}
+            session={session}
+            onSelect={onSelect}
+            onOpenSession={(id) =>
+              onOpenSession({
+                id,
+                limit: SESSION_LIMIT,
+                idleTimeoutMinutes,
+                ...(source === "" ? {} : { source })
+              })
+            }
+          />
         ))}
       </ul>
     </>
@@ -406,14 +563,22 @@ const ExchangesView = ({ onSelect }: { onSelect: (id: string) => void }) => {
   )
 }
 
+type View =
+  | { readonly kind: "list" }
+  | { readonly kind: "exchange"; readonly id: string }
+  | { readonly kind: "session"; readonly query: SessionQuery }
+
 export const App = () => {
   const [tab, setTab] = useState<"sessions" | "exchanges">("sessions")
-  const [selected, setSelected] = useState<string | null>(null)
+  const [view, setView] = useState<View>({ kind: "list" })
+  const back = () => setView({ kind: "list" })
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "1.5rem" }}>
       <h1 style={{ fontSize: "1.25rem" }}>LLM Visualizer</h1>
-      {selected === null ? (
+      {view.kind === "exchange" ? <ExchangeDetailView id={view.id} onBack={back} /> : null}
+      {view.kind === "session" ? <SessionDetailView query={view.query} onBack={back} /> : null}
+      {view.kind === "list" ? (
         <>
           <nav style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
             {(["sessions", "exchanges"] as const).map((name) => (
@@ -428,14 +593,15 @@ export const App = () => {
             ))}
           </nav>
           {tab === "sessions" ? (
-            <SessionsView onSelect={setSelected} />
+            <SessionsView
+              onSelect={(id) => setView({ kind: "exchange", id })}
+              onOpenSession={(query) => setView({ kind: "session", query })}
+            />
           ) : (
-            <ExchangesView onSelect={setSelected} />
+            <ExchangesView onSelect={(id) => setView({ kind: "exchange", id })} />
           )}
         </>
-      ) : (
-        <ExchangeDetailView id={selected} onBack={() => setSelected(null)} />
-      )}
+      ) : null}
     </main>
   )
 }

@@ -3,6 +3,7 @@ import type { Chunk, Exchange, ListExchangesOptions, StorageService } from "@llm
 import { TRPCError, initTRPC } from "@trpc/server"
 import { Effect, Option } from "effect"
 import { z } from "zod"
+import { diffExchange, type ExchangeDiff } from "./diff.js"
 import { DEFAULT_IDLE_TIMEOUT_MINUTES, groupSessions, type SessionCandidate } from "./sessions.js"
 
 export interface ExchangeSummary {
@@ -61,6 +62,15 @@ export interface ExchangeDetail {
   readonly raw: RawPayload
 }
 
+export interface SessionExchange extends ExchangeDetail {
+  /** Null for the first exchange in a session, which has no prior turn to diff against. */
+  readonly diff: ExchangeDiff | null
+}
+
+export interface SessionDetail extends Omit<SessionSummary, "exchanges"> {
+  readonly exchanges: ReadonlyArray<SessionExchange>
+}
+
 export interface ChunkView {
   readonly id: string
   readonly sequence: number
@@ -92,6 +102,12 @@ const sessionsInput = listInput.extend({
   sort: z.enum(["newest", "oldest"]).default("newest")
 })
 
+/** Sessions are derived, not stored, so a detail lookup must regroup with the same knobs. */
+const sessionInput = listInput.extend({
+  id: z.string().min(1),
+  idleTimeoutMinutes: z.number().positive().max(1440).default(DEFAULT_IDLE_TIMEOUT_MINUTES)
+})
+
 const t = initTRPC.create()
 
 export const createAppRouter = (storage: StorageService) => {
@@ -112,6 +128,29 @@ export const createAppRouter = (storage: StorageService) => {
     ...(input?.providerFormat === undefined ? {} : { provider_format: input.providerFormat })
   })
 
+  const chunksFor = (exchange: Exchange) =>
+    exchange.is_streaming ? run(storage.getChunks(exchange.id)) : Promise.resolve([])
+
+  const detail = (exchange: Exchange, chunks: ReadonlyArray<Chunk>): ExchangeDetail => ({
+    summary: summarize(exchange),
+    canonical: toCanonical(exchange, chunks),
+    raw: {
+      requestHeaders: exchange.request_headers,
+      requestBody: decode(exchange.request_body),
+      responseHeaders: exchange.response_headers,
+      responseBody: exchange.response_body === null ? null : decode(exchange.response_body)
+    }
+  })
+
+  const candidatesFor = async (input: z.infer<typeof listInput>): Promise<SessionCandidate[]> => {
+    const exchanges = await run(storage.listExchanges(listOptions(input)))
+    const candidates: SessionCandidate[] = []
+    for (const exchange of exchanges) {
+      candidates.push({ exchange, canonical: toCanonical(exchange, await chunksFor(exchange)) })
+    }
+    return candidates
+  }
+
   return t.router({
     exchanges: t.router({
       list: t.procedure.input(listInput.optional()).query(async ({ input }) => {
@@ -124,18 +163,7 @@ export const createAppRouter = (storage: StorageService) => {
           throw new TRPCError({ code: "NOT_FOUND", message: `no exchange with id ${input.id}` })
         }
         const exchange = found.value
-        const chunks = exchange.is_streaming ? await run(storage.getChunks(exchange.id)) : []
-
-        return {
-          summary: summarize(exchange),
-          canonical: toCanonical(exchange, chunks),
-          raw: {
-            requestHeaders: exchange.request_headers,
-            requestBody: decode(exchange.request_body),
-            responseHeaders: exchange.response_headers,
-            responseBody: exchange.response_body === null ? null : decode(exchange.response_body)
-          }
-        }
+        return detail(exchange, await chunksFor(exchange))
       }),
       chunks: t.procedure.input(idInput).query(async ({ input }): Promise<ReadonlyArray<ChunkView>> => {
         const chunks = await run(storage.getChunks(input.id))
@@ -149,13 +177,7 @@ export const createAppRouter = (storage: StorageService) => {
     }),
     sessions: t.router({
       list: t.procedure.input(sessionsInput).query(async ({ input }): Promise<ReadonlyArray<SessionSummary>> => {
-        const exchanges = await run(storage.listExchanges(listOptions(input)))
-
-        const candidates: SessionCandidate[] = []
-        for (const exchange of exchanges) {
-          const chunks = exchange.is_streaming ? await run(storage.getChunks(exchange.id)) : []
-          candidates.push({ exchange, canonical: toCanonical(exchange, chunks) })
-        }
+        const candidates = await candidatesFor(input)
 
         const sessions = groupSessions(candidates, input.idleTimeoutMinutes)
           .filter((session) => input.model === undefined || session.models.includes(input.model))
@@ -175,6 +197,36 @@ export const createAppRouter = (storage: StorageService) => {
             ? b.timestampStart - a.timestampStart
             : a.timestampStart - b.timestampStart
         )
+      }),
+      get: t.procedure.input(sessionInput).query(async ({ input }): Promise<SessionDetail> => {
+        const candidates = await candidatesFor(input)
+        const session = groupSessions(candidates, input.idleTimeoutMinutes).find(
+          (candidate) => candidate.id === input.id
+        )
+        if (session === undefined) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `no session with id ${input.id}` })
+        }
+
+        const exchanges: SessionExchange[] = []
+        for (const [index, exchange] of session.exchanges.entries()) {
+          const current = detail(exchange, await chunksFor(exchange))
+          const prior = exchanges[index - 1]
+          exchanges.push({
+            ...current,
+            diff: prior === undefined ? null : diffExchange(prior.canonical, current.canonical)
+          })
+        }
+
+        return {
+          id: session.id,
+          timestampStart: session.timestampStart,
+          timestampEnd: session.timestampEnd,
+          source: session.source,
+          providerFormat: session.providerFormat,
+          models: session.models,
+          groupedBy: session.groupedBy,
+          exchanges
+        }
       })
     })
   })
