@@ -7,7 +7,7 @@ import {
   type ServerResponse
 } from "node:http"
 import { request as httpsRequest } from "node:https"
-import type { Exchange, Headers, StorageService } from "@llmviz/storage"
+import type { Chunk, Exchange, Headers, StorageService } from "@llmviz/storage"
 import { Effect } from "effect"
 import type { ProxyConfig } from "./config.js"
 import { detect } from "./detect.js"
@@ -63,13 +63,13 @@ const parseJson = (body: Buffer): Record<string, unknown> | undefined => {
   }
 }
 
-const forward = (
+const open = (
   target: URL,
   method: string,
   path: string,
   headers: Headers,
   body: Buffer
-): Promise<UpstreamResponse> => {
+): Promise<IncomingMessage> => {
   const outbound: Record<string, string> = {}
   for (const [name, value] of Object.entries(headers)) {
     if (HOP_BY_HOP.has(name.toLowerCase())) continue
@@ -92,21 +92,26 @@ const forward = (
         path,
         headers: outbound
       },
-      (res) => {
-        readBody(res).then(
-          (buffer) =>
-            resolve({
-              status: res.statusCode ?? 502,
-              headers: flattenHeaders(res.headers),
-              body: buffer
-            }),
-          reject
-        )
-      }
+      resolve
     )
     req.on("error", reject)
     req.end(body)
   })
+}
+
+const forward = async (
+  target: URL,
+  method: string,
+  path: string,
+  headers: Headers,
+  body: Buffer
+): Promise<UpstreamResponse> => {
+  const res = await open(target, method, path, headers, body)
+  return {
+    status: res.statusCode ?? 502,
+    headers: flattenHeaders(res.headers),
+    body: await readBody(res)
+  }
 }
 
 const respond = (res: ServerResponse, status: number, headers: Headers, body: Buffer): void => {
@@ -117,6 +122,21 @@ const respond = (res: ServerResponse, status: number, headers: Headers, body: Bu
   res.setHeader("content-length", String(body.length))
   res.writeHead(status)
   res.end(body)
+}
+
+const beginStream = (res: ServerResponse, status: number, headers: Headers): void => {
+  for (const [name, value] of Object.entries(headers)) {
+    const lower = name.toLowerCase()
+    if (HOP_BY_HOP.has(lower) || lower === "content-length") continue
+    res.setHeader(name, value)
+  }
+  res.writeHead(status)
+  res.flushHeaders()
+}
+
+interface StreamOutcome {
+  readonly complete: boolean
+  readonly error: string | null
 }
 
 export const start = async (
@@ -131,6 +151,64 @@ export const start = async (
         )
       )
     )
+
+  const persistChunk = (chunk: Chunk): Promise<void> =>
+    Effect.runPromise(
+      storage.appendChunk(chunk).pipe(
+        Effect.catchAll((error) =>
+          Effect.sync(() => console.error("[llmviz] failed to persist chunk", error))
+        )
+      )
+    )
+
+  const relay = (
+    upstream: IncomingMessage,
+    res: ServerResponse,
+    exchangeId: string
+  ): Promise<StreamOutcome> =>
+    new Promise((resolve) => {
+      let sequence = 0
+      let settled = false
+      // Chunk writes are chained so records land in `sequence` order regardless of how
+      // the storage adapter schedules them.
+      let writes: Promise<void> = Promise.resolve()
+
+      const settle = (outcome: StreamOutcome): void => {
+        if (settled) return
+        settled = true
+        writes.then(() => resolve(outcome))
+      }
+
+      upstream.on("data", (part: Buffer) => {
+        if (!res.write(part)) {
+          upstream.pause()
+          res.once("drain", () => upstream.resume())
+        }
+        const chunk: Chunk = {
+          id: randomUUID(),
+          exchange_id: exchangeId,
+          sequence: sequence++,
+          timestamp: Date.now(),
+          raw_data: new Uint8Array(part)
+        }
+        writes = writes.then(() => persistChunk(chunk))
+      })
+
+      upstream.on("end", () => {
+        res.end()
+        settle({ complete: true, error: null })
+      })
+
+      upstream.on("error", (cause: Error) => {
+        res.destroy()
+        settle({ complete: false, error: cause.message })
+      })
+
+      res.on("close", () => {
+        upstream.destroy()
+        settle({ complete: false, error: "client disconnected before the stream completed" })
+      })
+    })
 
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const path = req.url ?? "/"
@@ -160,6 +238,24 @@ export const start = async (
     await persist(exchange)
 
     try {
+      if (detection.is_streaming) {
+        const upstream = await open(target, exchange.http_method, path, requestHeaders, requestBody)
+        const status = upstream.statusCode ?? 502
+        const responseHeaders = flattenHeaders(upstream.headers)
+        beginStream(res, status, responseHeaders)
+
+        const outcome = await relay(upstream, res, exchange.id)
+        await persist({
+          ...exchange,
+          timestamp_end: Date.now(),
+          status_code: status,
+          response_headers: responseHeaders,
+          response_complete: outcome.complete,
+          proxy_error: outcome.error
+        })
+        return
+      }
+
       const upstream = await forward(target, exchange.http_method, path, requestHeaders, requestBody)
       await persist({
         ...exchange,

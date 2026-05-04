@@ -95,6 +95,50 @@ const loggedExchanges = (): Promise<ReadonlyArray<Exchange>> =>
 const text = (bytes: Uint8Array | null) =>
   bytes === null ? null : new TextDecoder().decode(bytes)
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
+
+/** The exchange is finalised after the client's stream ends, so poll for the final write. */
+const settledExchange = async (): Promise<Exchange> => {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const [exchange] = await loggedExchanges()
+    if (exchange !== undefined && exchange.timestamp_end !== null) return exchange
+    await sleep(10)
+  }
+  throw new Error("exchange never settled")
+}
+
+interface Arrival {
+  readonly at: number
+  readonly text: string
+}
+
+const postStreaming = async (
+  port: number,
+  path: string,
+  body: unknown
+): Promise<{ status: number; arrivals: Array<Arrival>; failed: boolean }> => {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  })
+  const reader = response.body!.getReader()
+  const decoder = new TextDecoder()
+  const arrivals: Array<Arrival> = []
+  const startedAt = Date.now()
+  let failed = false
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      arrivals.push({ at: Date.now() - startedAt, text: decoder.decode(value) })
+    }
+  } catch {
+    failed = true
+  }
+  return { status: response.status, arrivals, failed }
+}
+
 it("round-trips a non-streaming request and logs the exchange", async () => {
   upstream = await startUpstream((_req, res) => {
     res.writeHead(200, { "content-type": "application/json" })
@@ -209,6 +253,77 @@ it("records a proxy_error when the upstream is unreachable", async () => {
   expect(exchange!.proxy_error).toContain("ECONNREFUSED")
   expect(exchange!.status_code).toBeNull()
   expect(exchange!.response_complete).toBe(false)
+})
+
+const SSE_EVENTS = [
+  'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1"}}\n\n',
+  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0}\n\n',
+  'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+]
+
+it("streams SSE chunks through to the client and persists each one in order", async () => {
+  upstream = await startUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" })
+    void (async () => {
+      for (const event of SSE_EVENTS) {
+        res.write(event)
+        await sleep(40)
+      }
+      res.end()
+    })()
+  })
+  proxy = await start(configFor(upstream.port), storage)
+
+  const { status, arrivals, failed } = await postStreaming(proxy.port, "/v1/messages", {
+    model: "claude-sonnet-5",
+    stream: true,
+    messages: [{ role: "user", content: "hey" }]
+  })
+
+  expect(status).toBe(200)
+  expect(failed).toBe(false)
+  expect(arrivals.length).toBeGreaterThanOrEqual(SSE_EVENTS.length)
+  // Progressive delivery: the first bytes reach the client long before the last ones.
+  expect(arrivals[0]!.at).toBeLessThan(arrivals[arrivals.length - 1]!.at - 20)
+  expect(arrivals.map((arrival) => arrival.text).join("")).toBe(SSE_EVENTS.join(""))
+
+  const exchange = await settledExchange()
+  expect(exchange.is_streaming).toBe(true)
+  expect(exchange.status_code).toBe(200)
+  expect(exchange.response_headers!["content-type"]).toBe("text/event-stream")
+  expect(exchange.response_body).toBeNull()
+  expect(exchange.response_complete).toBe(true)
+  expect(exchange.proxy_error).toBeNull()
+
+  const chunks = await Effect.runPromise(Effect.orDie(storage.getChunks(exchange.id)))
+  expect(chunks.length).toBeGreaterThanOrEqual(SSE_EVENTS.length)
+  expect(chunks.map((chunk) => chunk.sequence)).toEqual(chunks.map((_, index) => index))
+  expect(chunks.map((chunk) => text(chunk.raw_data)).join("")).toBe(SSE_EVENTS.join(""))
+})
+
+it("marks the exchange incomplete when the upstream drops mid-stream", async () => {
+  upstream = await startUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" })
+    res.write(SSE_EVENTS[0]!)
+    setTimeout(() => res.socket?.destroy(), 40)
+  })
+  proxy = await start(configFor(upstream.port), storage)
+
+  const { arrivals } = await postStreaming(proxy.port, "/v1/messages", {
+    model: "claude-sonnet-5",
+    stream: true,
+    messages: [{ role: "user", content: "hey" }]
+  })
+
+  expect(arrivals.map((arrival) => arrival.text).join("")).toBe(SSE_EVENTS[0])
+
+  const exchange = await settledExchange()
+  expect(exchange.response_complete).toBe(false)
+  expect(exchange.proxy_error).not.toBeNull()
+
+  const chunks = await Effect.runPromise(Effect.orDie(storage.getChunks(exchange.id)))
+  expect(chunks).toHaveLength(1)
+  expect(text(chunks[0]!.raw_data)).toBe(SSE_EVENTS[0])
 })
 
 it("defaults to a loopback bind and the real provider endpoints", () => {
