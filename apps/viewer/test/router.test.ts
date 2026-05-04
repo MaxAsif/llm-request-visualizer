@@ -1,4 +1,4 @@
-import { type Exchange, Sqlite, Storage, type StorageService } from "@llmviz/storage"
+import { type Chunk, type Exchange, Sqlite, Storage, type StorageService } from "@llmviz/storage"
 import { Context, Effect, Exit, Layer, Scope } from "effect"
 import { afterEach, beforeEach, expect, it } from "vitest"
 import { createAppRouter } from "../src/server/router.js"
@@ -98,4 +98,93 @@ it("groups exchanges into sessions by prefix-matching and splits on the idle tim
   expect(merged.map((session) => session.exchanges.map((e) => e.id))).toEqual([["a", "b", "c"]])
 
   expect((await caller.sessions.list({ model: "gpt-nope" })).length).toBe(0)
+})
+
+const sseChunks = (exchangeId: string, events: ReadonlyArray<string>): ReadonlyArray<Chunk> =>
+  events.map((event, index) => ({
+    id: `${exchangeId}-${index}`,
+    exchange_id: exchangeId,
+    sequence: index,
+    timestamp: 1000 + index,
+    raw_data: new TextEncoder().encode(`data: ${event}\n\n`)
+  }))
+
+it("returns canonical and raw payloads for a single exchange", async () => {
+  const requestBody = new TextEncoder().encode(
+    JSON.stringify({
+      model: "claude-opus-5",
+      system: "be brief",
+      messages: [{ role: "user", content: "hi" }]
+    })
+  )
+  const responseBody = new TextEncoder().encode(
+    JSON.stringify({
+      model: "claude-opus-5",
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "hello" }],
+      usage: { input_tokens: 3, output_tokens: 1 }
+    })
+  )
+  await Effect.runPromise(
+    storage.writeExchange(
+      exchange("solo", 1000, {
+        request_body: requestBody,
+        response_headers: { "content-type": "application/json" },
+        response_body: responseBody
+      })
+    )
+  )
+
+  const caller = createAppRouter(storage).createCaller({})
+  const detail = await caller.exchanges.get({ id: "solo" })
+
+  expect(detail.summary.id).toBe("solo")
+  expect(detail.canonical.model).toBe("claude-opus-5")
+  expect(detail.canonical.systemPrompt).toBe("be brief")
+  expect(detail.canonical.responseText).toBe("hello")
+  expect(detail.canonical.stopReason).toBe("end_turn")
+  expect(detail.canonical.usage).toMatchObject({ input_tokens: 3, output_tokens: 1 })
+  expect(detail.raw.requestHeaders).toEqual({ "content-type": "application/json" })
+  expect(JSON.parse(detail.raw.requestBody).system).toBe("be brief")
+  expect(detail.raw.responseHeaders).toEqual({ "content-type": "application/json" })
+  expect(JSON.parse(detail.raw.responseBody!).stop_reason).toBe("end_turn")
+
+  await expect(caller.exchanges.get({ id: "missing" })).rejects.toThrow(/no exchange with id/)
+})
+
+it("returns the raw chunk stream and canonical reconstruction for a streaming exchange", async () => {
+  const chunks = sseChunks("stream", [
+    JSON.stringify({ type: "message_start", message: { model: "claude-opus-5", usage: { input_tokens: 5 } } }),
+    JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }),
+    JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "par" } }),
+    JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "tial" } }),
+    JSON.stringify({ type: "content_block_stop", index: 0 }),
+    JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } })
+  ])
+
+  await Effect.runPromise(
+    storage.writeExchange(
+      exchange("stream", 1000, {
+        is_streaming: true,
+        request_body: new TextEncoder().encode(JSON.stringify({ model: "claude-opus-5", stream: true, messages: [] })),
+        response_headers: { "content-type": "text/event-stream" }
+      })
+    )
+  )
+  for (const chunk of chunks) await Effect.runPromise(storage.appendChunk(chunk))
+
+  const caller = createAppRouter(storage).createCaller({})
+
+  const detail = await caller.exchanges.get({ id: "stream" })
+  expect(detail.summary.isStreaming).toBe(true)
+  expect(detail.canonical.responseText).toBe("partial")
+  expect(detail.canonical.stopReason).toBe("end_turn")
+  expect(detail.canonical.usage).toMatchObject({ input_tokens: 5, output_tokens: 2 })
+
+  const stream = await caller.exchanges.chunks({ id: "stream" })
+  expect(stream.map((chunk) => chunk.sequence)).toEqual([0, 1, 2, 3, 4, 5])
+  expect(stream[0]!.timestamp).toBe(1000)
+  expect(stream[2]!.data).toContain('"text_delta"')
+
+  expect(await caller.exchanges.chunks({ id: "solo" })).toEqual([])
 })

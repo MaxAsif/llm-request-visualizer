@@ -1,7 +1,7 @@
-import { Anthropic, OpenAI } from "@llmviz/canonical"
+import { Anthropic, type CanonicalExchange, OpenAI } from "@llmviz/canonical"
 import type { Chunk, Exchange, ListExchangesOptions, StorageService } from "@llmviz/storage"
 import { TRPCError, initTRPC } from "@trpc/server"
-import { Effect } from "effect"
+import { Effect, Option } from "effect"
 import { z } from "zod"
 import { DEFAULT_IDLE_TIMEOUT_MINUTES, groupSessions, type SessionCandidate } from "./sessions.js"
 
@@ -48,10 +48,34 @@ export interface SessionSummary {
   readonly exchanges: ReadonlyArray<ExchangeSummary>
 }
 
+export interface RawPayload {
+  readonly requestHeaders: Readonly<Record<string, string>>
+  readonly requestBody: string
+  readonly responseHeaders: Readonly<Record<string, string>> | null
+  readonly responseBody: string | null
+}
+
+export interface ExchangeDetail {
+  readonly summary: ExchangeSummary
+  readonly canonical: CanonicalExchange
+  readonly raw: RawPayload
+}
+
+export interface ChunkView {
+  readonly id: string
+  readonly sequence: number
+  readonly timestamp: number
+  readonly data: string
+}
+
 const toCanonical = (exchange: Exchange, chunks: ReadonlyArray<Chunk>) =>
   exchange.provider_format === "anthropic"
     ? Anthropic.normalize(exchange, chunks)
     : OpenAI.normalize(exchange, chunks)
+
+/** Stored bodies are always text/JSON in this domain, and tRPC's JSON transformer mangles bytes. */
+const decoder = new TextDecoder()
+const decode = (bytes: Uint8Array): string => decoder.decode(bytes)
 
 const listInput = z.object({
   limit: z.number().int().positive().max(1000).optional(),
@@ -59,6 +83,8 @@ const listInput = z.object({
   source: z.enum(["claude-code", "codex", "unknown"]).optional(),
   providerFormat: z.enum(["anthropic", "openai"]).optional()
 })
+
+const idInput = z.object({ id: z.string().min(1) })
 
 const sessionsInput = listInput.extend({
   idleTimeoutMinutes: z.number().positive().max(1440).default(DEFAULT_IDLE_TIMEOUT_MINUTES),
@@ -91,6 +117,34 @@ export const createAppRouter = (storage: StorageService) => {
       list: t.procedure.input(listInput.optional()).query(async ({ input }) => {
         const exchanges = await run(storage.listExchanges(listOptions(input)))
         return exchanges.map(summarize)
+      }),
+      get: t.procedure.input(idInput).query(async ({ input }): Promise<ExchangeDetail> => {
+        const found = await run(storage.getExchange(input.id))
+        if (Option.isNone(found)) {
+          throw new TRPCError({ code: "NOT_FOUND", message: `no exchange with id ${input.id}` })
+        }
+        const exchange = found.value
+        const chunks = exchange.is_streaming ? await run(storage.getChunks(exchange.id)) : []
+
+        return {
+          summary: summarize(exchange),
+          canonical: toCanonical(exchange, chunks),
+          raw: {
+            requestHeaders: exchange.request_headers,
+            requestBody: decode(exchange.request_body),
+            responseHeaders: exchange.response_headers,
+            responseBody: exchange.response_body === null ? null : decode(exchange.response_body)
+          }
+        }
+      }),
+      chunks: t.procedure.input(idInput).query(async ({ input }): Promise<ReadonlyArray<ChunkView>> => {
+        const chunks = await run(storage.getChunks(input.id))
+        return chunks.map((chunk) => ({
+          id: chunk.id,
+          sequence: chunk.sequence,
+          timestamp: chunk.timestamp,
+          data: decode(chunk.raw_data)
+        }))
       })
     }),
     sessions: t.router({
