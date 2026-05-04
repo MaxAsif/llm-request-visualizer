@@ -35,6 +35,16 @@ export const makeChunks = (exchangeId: string, events: ReadonlyArray<unknown>): 
     )
   }))
 
+/** Raw SSE payload chunks, for streams whose events are not self-describing in an `event:` line. */
+export const makeDataChunks = (exchangeId: string, payloads: ReadonlyArray<string>): Chunk[] =>
+  payloads.map((payload, index) => ({
+    id: `${exchangeId}-chunk-${index}`,
+    exchange_id: exchangeId,
+    sequence: index,
+    timestamp: 1_700_000_000_000 + index,
+    raw_data: encoder.encode(`data: ${payload}\n\n`)
+  }))
+
 export const toolUseRequest = {
   model: "claude-opus-5",
   max_tokens: 4096,

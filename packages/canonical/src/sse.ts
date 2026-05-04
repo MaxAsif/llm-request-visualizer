@@ -2,10 +2,10 @@ import type { Chunk } from "@llmviz/storage"
 import { asNumberOrNull, asString, decodeText, isRecord, type Json } from "./json.js"
 
 /**
- * Anthropic repeats the event name inside the `data` payload, so the `event:` line is
+ * Both providers repeat the event name inside the `data` payload, so the `event:` line is
  * redundant and only the JSON payloads are collected here.
  */
-const parseEvents = (text: string): ReadonlyArray<Json> => {
+export const parseEvents = (text: string): ReadonlyArray<Json> => {
   const events: Json[] = []
   for (const line of text.split("\n")) {
     const trimmed = line.trimEnd()
@@ -22,15 +22,18 @@ const parseEvents = (text: string): ReadonlyArray<Json> => {
   return events
 }
 
+export const chunkText = (chunks: ReadonlyArray<Chunk>): string =>
+  [...chunks]
+    .sort((a, b) => a.sequence - b.sequence)
+    .map((chunk) => decodeText(chunk.raw_data))
+    .join("")
+
 /**
  * Replays raw Anthropic SSE chunks into the message shape a non-streaming response
  * would have returned.
  */
 export const reconstructStream = (chunks: ReadonlyArray<Chunk>): Json => {
-  const text = [...chunks]
-    .sort((a, b) => a.sequence - b.sequence)
-    .map((chunk) => decodeText(chunk.raw_data))
-    .join("")
+  const text = chunkText(chunks)
 
   let message: Json = {}
   const blocks = new Map<number, Json>()
