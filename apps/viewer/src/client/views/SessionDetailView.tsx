@@ -84,10 +84,11 @@ export interface SessionQuery {
 export const SessionDetailView = ({ query, onBack }: { query: SessionQuery; onBack: () => void }) => {
   const trpc = useTRPC()
   const session = useQuery(trpc.sessions.get.queryOptions(query))
-  const [collapsedIds, setCollapsedIds] = useState<ReadonlySet<string>>(new Set())
+  // Collapsed by default: track which exchanges have been explicitly expanded, not the reverse.
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(new Set())
 
   const toggle = (id: string) =>
-    setCollapsedIds((prev) => {
+    setExpandedIds((prev) => {
       const next = new Set(prev)
       if (next.has(id)) next.delete(id)
       else next.add(id)
@@ -95,7 +96,7 @@ export const SessionDetailView = ({ query, onBack }: { query: SessionQuery; onBa
     })
 
   const allIds = (session.data?.exchanges ?? []).map((exchange) => exchange.summary.id)
-  const allCollapsed = allIds.length > 0 && allIds.every((id) => collapsedIds.has(id))
+  const allCollapsed = expandedIds.size === 0
 
   return (
     <>
@@ -124,7 +125,7 @@ export const SessionDetailView = ({ query, onBack }: { query: SessionQuery; onBa
             <button
               type="button"
               className="btn"
-              onClick={() => setCollapsedIds(allCollapsed ? new Set() : new Set(allIds))}
+              onClick={() => setExpandedIds(allCollapsed ? new Set(allIds) : new Set())}
             >
               {allCollapsed ? "Expand all" : "Minimize all"}
             </button>
@@ -135,7 +136,7 @@ export const SessionDetailView = ({ query, onBack }: { query: SessionQuery; onBa
                 key={exchange.summary.id}
                 exchange={exchange}
                 index={index}
-                collapsed={collapsedIds.has(exchange.summary.id)}
+                collapsed={!expandedIds.has(exchange.summary.id)}
                 onToggle={() => toggle(exchange.summary.id)}
               />
             ))}

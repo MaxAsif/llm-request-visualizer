@@ -4,7 +4,7 @@ import type { CanonicalExchange, ContentBlock } from "../lib/types.js"
 import { UsageBar } from "./UsageBar.js"
 
 export const Section = ({ title, children }: { title: string; children: ReactNode }) => {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true)
   return (
     <section className="section">
       <button type="button" className="section__header" onClick={() => setCollapsed(!collapsed)}>
