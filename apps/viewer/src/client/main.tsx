@@ -4,6 +4,7 @@ import { StrictMode } from "react"
 import { createRoot } from "react-dom/client"
 import type { AppRouter } from "../server/router.js"
 import { App } from "./App.js"
+import "./styles/index.css"
 import { TRPCProvider } from "./trpc.js"
 
 const queryClient = new QueryClient()

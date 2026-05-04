@@ -1,0 +1,62 @@
+/*
+ * Design tokens for LLM Visualizer.
+ *
+ * Direction: an instrument panel for inspecting LLM traffic, not a marketing
+ * surface. Deep ink-navy chrome (distinct from GitHub-dark or pure black),
+ * a soft lavender-white ink for text, and a set of semantic accents that do
+ * real work — one per message role, one per exchange status — rather than a
+ * single decorative neon. Monospace (self-hosted JetBrains Mono) carries the
+ * actual payloads; the UI face stays out of the way.
+ */
+
+:root {
+  /* Neutral scale — app chrome */
+  --ink-0: #0d0f18; /* app background */
+  --ink-1: #151827; /* panel / card surface */
+  --ink-2: #1c2033; /* raised surface, code blocks, hover */
+  --ink-3: #262b42; /* stronger raised surface (active tab, kbd) */
+  --line: #2b2f47; /* hairline borders */
+  --line-strong: #3a3f5c;
+
+  --text: #e8e7f2; /* primary text */
+  --text-dim: #a6a4bf; /* secondary text, labels */
+  --text-faint: #6b6a86; /* tertiary, timestamps, placeholders */
+
+  /* Semantic accents */
+  --accent-cyan: #5fe3d1; /* streaming / live / links / active state */
+  --accent-cyan-dim: #234b47;
+  --accent-blue: #6ea8fe; /* role: user */
+  --accent-blue-dim: #202d4d;
+  --accent-violet: #b6a3ff; /* role: assistant, thinking/reasoning */
+  --accent-violet-dim: #322a52;
+  --accent-amber: #eeae4d; /* tool_use, warnings */
+  --accent-amber-dim: #4a3a20;
+  --accent-teal: #59c6a8; /* tool_result (success) */
+  --accent-teal-dim: #1f3f37;
+  --accent-coral: #f2716b; /* errors, diverged state */
+  --accent-coral-dim: #4a2523;
+  --accent-gray: #9a98b0; /* role: system, unknown blocks */
+
+  /* Type */
+  --font-ui: -apple-system, "Segoe UI", "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono", Consolas, monospace;
+
+  --text-xs: 0.6875rem; /* 11px — eyebrows, micro-labels */
+  --text-sm: 0.8125rem; /* 13px — body mono, dense UI */
+  --text-base: 0.875rem; /* 14px — default UI text */
+  --text-md: 0.9375rem; /* 15px — section headers */
+  --text-lg: 1.125rem; /* 18px — page title */
+
+  /* Space scale (4px base) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px var(--line);
+}
