@@ -1,0 +1,19 @@
+{
+  "name": "@llmviz/canonical",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@llmviz/storage": "workspace:*",
+    "effect": "^3.22.1"
+  }
+}

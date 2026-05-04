@@ -1,0 +1,16 @@
+{
+  "name": "@llmviz/proxy",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/main.js",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node ./dist/main.js"
+  },
+  "dependencies": {
+    "@llmviz/canonical": "workspace:*",
+    "@llmviz/storage": "workspace:*",
+    "effect": "^3.22.1"
+  }
+}
