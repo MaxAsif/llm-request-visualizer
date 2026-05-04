@@ -1,3 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+.env
+llmviz.db
+llmviz.db-shm
+llmviz.db-wal

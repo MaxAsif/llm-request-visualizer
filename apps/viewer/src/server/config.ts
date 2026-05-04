@@ -11,7 +11,7 @@ export const defaultConfig: ViewerConfig = {
 }
 
 export const loadConfig = (env: NodeJS.ProcessEnv = process.env): ViewerConfig => ({
-  host: defaultConfig.host,
+  host: env["LLMVIZ_VIEWER_HOST"] ?? defaultConfig.host,
   port:
     env["LLMVIZ_VIEWER_API_PORT"] === undefined
       ? defaultConfig.port
