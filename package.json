@@ -6,7 +6,7 @@
   "packageManager": "pnpm@11.5.3",
   "scripts": {
     "build": "tsc -b",
-    "typecheck": "tsc -b && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -b && tsc -p tsconfig.test.json && tsc -p apps/viewer/tsconfig.client.json",
     "clean": "tsc -b --clean",
     "test": "vitest run"
   },

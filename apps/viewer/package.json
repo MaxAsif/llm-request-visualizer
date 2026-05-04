@@ -3,14 +3,30 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "main": "./dist/main.js",
+  "main": "./dist/server/main.js",
   "scripts": {
-    "build": "tsc -b",
-    "start": "node ./dist/main.js"
+    "build": "tsc -b && vite build",
+    "dev": "vite",
+    "dev:api": "node ./dist/server/main.js",
+    "start": "node ./dist/server/main.js",
+    "test": "vitest run --root ../.."
   },
   "dependencies": {
     "@llmviz/canonical": "workspace:*",
     "@llmviz/storage": "workspace:*",
-    "effect": "^3.22.1"
+    "@tanstack/react-query": "^5.101.4",
+    "@trpc/client": "^11.18.0",
+    "@trpc/server": "^11.18.0",
+    "@trpc/tanstack-react-query": "^11.18.0",
+    "effect": "^3.22.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "vite": "^8.2.0"
   }
 }
