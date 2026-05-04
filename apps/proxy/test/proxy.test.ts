@@ -3,7 +3,7 @@ import { type Exchange, Sqlite, Storage, type StorageService } from "@llmviz/sto
 import { Context, Effect, Exit, Layer, Scope } from "effect"
 import { afterEach, beforeEach, expect, it } from "vitest"
 import { defaultConfig, type ProxyConfig } from "../src/config.js"
-import { type ProxyHandle, start } from "../src/server.js"
+import { type ProxyHandle, REDACTED, start } from "../src/server.js"
 
 interface UpstreamCall {
   readonly method: string
@@ -70,14 +70,18 @@ afterEach(async () => {
   await releaseStorage()
 })
 
-const configFor = (upstreamPort: number): ProxyConfig => ({
-  host: "127.0.0.1",
+const configFor = (
+  upstreamPort: number,
+  overrides: Partial<ProxyConfig> = {}
+): ProxyConfig => ({
+  ...defaultConfig,
   port: 0,
   upstreams: {
     anthropic: `http://127.0.0.1:${upstreamPort}`,
     openai: `http://127.0.0.1:${upstreamPort}`
   },
-  databasePath: ":memory:"
+  databasePath: ":memory:",
+  ...overrides
 })
 
 const post = async (port: number, path: string, headers: Record<string, string>, body: unknown) => {
@@ -324,6 +328,81 @@ it("marks the exchange incomplete when the upstream drops mid-stream", async () 
   const chunks = await Effect.runPromise(Effect.orDie(storage.getChunks(exchange.id)))
   expect(chunks).toHaveLength(1)
   expect(text(chunks[0]!.raw_data)).toBe(SSE_EVENTS[0])
+})
+
+const okUpstream = () =>
+  startUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" })
+    res.end("{}")
+  })
+
+const AUTH_HEADERS = {
+  authorization: "Bearer sk-live-token",
+  "x-api-key": "sk-secret",
+  cookie: "session=abc"
+}
+
+it("redacts known auth headers in storage while forwarding the real values", async () => {
+  upstream = await okUpstream()
+  proxy = await start(configFor(upstream.port), storage)
+
+  await post(proxy.port, "/v1/messages", AUTH_HEADERS, { model: "claude-sonnet-5" })
+
+  const call = upstream.calls[0]!
+  expect(call.headers["authorization"]).toBe("Bearer sk-live-token")
+  expect(call.headers["x-api-key"]).toBe("sk-secret")
+  expect(call.headers["cookie"]).toBe("session=abc")
+
+  const [exchange] = await loggedExchanges()
+  expect(exchange!.request_headers["authorization"]).toBe(REDACTED)
+  expect(exchange!.request_headers["x-api-key"]).toBe(REDACTED)
+  expect(exchange!.request_headers["cookie"]).toBe(REDACTED)
+  expect(exchange!.request_headers["content-type"]).toBe("application/json")
+})
+
+it("stores real auth headers when redaction is disabled", async () => {
+  upstream = await okUpstream()
+  proxy = await start(configFor(upstream.port, { redactHeaders: false }), storage)
+
+  await post(proxy.port, "/v1/messages", AUTH_HEADERS, { model: "claude-sonnet-5" })
+
+  const [exchange] = await loggedExchanges()
+  expect(exchange!.request_headers["authorization"]).toBe("Bearer sk-live-token")
+  expect(exchange!.request_headers["x-api-key"]).toBe("sk-secret")
+})
+
+it("redacts auth headers on streaming exchanges too", async () => {
+  upstream = await startUpstream((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" })
+    res.end(SSE_EVENTS[0]!)
+  })
+  proxy = await start(configFor(upstream.port), storage)
+
+  await fetch(`http://127.0.0.1:${proxy.port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...AUTH_HEADERS },
+    body: JSON.stringify({ model: "claude-sonnet-5", stream: true })
+  }).then((response) => response.text())
+
+  expect(upstream.calls[0]!.headers["x-api-key"]).toBe("sk-secret")
+  const exchange = await settledExchange()
+  expect(exchange.request_headers["x-api-key"]).toBe(REDACTED)
+})
+
+it("honours a custom redacted-header list", async () => {
+  upstream = await okUpstream()
+  proxy = await start(configFor(upstream.port, { redactedHeaders: ["x-tenant"] }), storage)
+
+  await post(
+    proxy.port,
+    "/v1/messages",
+    { ...AUTH_HEADERS, "x-tenant": "acme" },
+    { model: "claude-sonnet-5" }
+  )
+
+  const [exchange] = await loggedExchanges()
+  expect(exchange!.request_headers["x-tenant"]).toBe(REDACTED)
+  expect(exchange!.request_headers["x-api-key"]).toBe("sk-secret")
 })
 
 it("defaults to a loopback bind and the real provider endpoints", () => {

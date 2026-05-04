@@ -43,6 +43,18 @@ const flattenHeaders = (headers: IncomingHttpHeaders): Headers => {
   return out
 }
 
+export const REDACTED = "[redacted]"
+
+const redact = (headers: Headers, config: ProxyConfig): Headers => {
+  if (!config.redactHeaders) return headers
+  const sensitive = new Set(config.redactedHeaders)
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    out[name] = sensitive.has(name.toLowerCase()) ? REDACTED : value
+  }
+  return out
+}
+
 const readBody = (stream: IncomingMessage): Promise<Buffer> =>
   new Promise((resolve, reject) => {
     const parts: Buffer[] = []
@@ -227,7 +239,7 @@ export const start = async (
       path,
       upstream_host: target.host,
       status_code: null,
-      request_headers: requestHeaders,
+      request_headers: redact(requestHeaders, config),
       request_body: new Uint8Array(requestBody),
       is_streaming: detection.is_streaming,
       response_headers: null,
