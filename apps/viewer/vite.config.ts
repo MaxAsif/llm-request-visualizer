@@ -22,6 +22,16 @@ export default defineConfig(({ mode }) => {
           rewrite: (path) => path.replace(/^\/trpc/, "")
         }
       }
+    },
+    preview: {
+      port: 5317,
+      allowedHosts: allowedHosts.length === 0 ? undefined : allowedHosts,
+      proxy: {
+        "/trpc": {
+          target: `http://127.0.0.1:${apiPort}`,
+          rewrite: (path) => path.replace(/^\/trpc/, "")
+        }
+      }
     }
   }
 })

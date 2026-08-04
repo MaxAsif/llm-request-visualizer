@@ -1,0 +1,11 @@
+node_modules
+**/node_modules
+dist
+**/dist
+**/*.tsbuildinfo
+.git
+llmviz.db
+llmviz.db-shm
+llmviz.db-wal
+llmviz-logs
+.env

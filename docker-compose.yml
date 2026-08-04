@@ -1,0 +1,29 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: apps/proxy/Dockerfile
+    ports:
+      - "8317:8317"
+    volumes:
+      - llmviz-data:/data
+    environment:
+      LLMVIZ_HOST: 0.0.0.0
+      LLMVIZ_DB: /data/llmviz.db
+
+  viewer:
+    build:
+      context: .
+      dockerfile: apps/viewer/Dockerfile
+    ports:
+      - "5317:5317"
+    volumes:
+      - llmviz-data:/data
+    environment:
+      LLMVIZ_VIEWER_HOST: 0.0.0.0
+      LLMVIZ_DB: /data/llmviz.db
+    depends_on:
+      - proxy
+
+volumes:
+  llmviz-data:
